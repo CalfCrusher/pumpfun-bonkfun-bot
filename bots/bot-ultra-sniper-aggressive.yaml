@@ -67,7 +67,7 @@ filters:
   yolo_mode: true # CONTINUOUS MODE - Trade all matching tokens non-stop!
 
   # Liquidity filtering (real reserves preferred)
-  min_real_liquidity_sol: 15.0   # Minimum REAL SOL liquidity to buy (preferred)
+  min_real_liquidity_sol: 20.0   # Minimum REAL SOL liquidity to buy (preferred)
   min_market_cap_sol: 15.0       # Legacy/backup key; ignored if min_real_liquidity_sol is set
   wait_before_buy: 3              # Give more time for curve account to appear reliably
 
