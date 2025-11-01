@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import multiprocessing
+import signal
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -172,81 +174,129 @@ def run_all_bots():
 
     logging.info(f"Found {len(bot_files)} bot configuration files")
 
-    processes = []
+    processes: list[multiprocessing.Process] = []
     skipped_bots = 0
 
-    for file in bot_files:
-        try:
-            cfg = load_bot_config(str(file))
-            bot_name = cfg.get("name", file.stem)
-
-            # Skip bots with enabled=False
-            if not cfg.get("enabled", True):
-                logging.info(f"Skipping disabled bot '{bot_name}'")
-                skipped_bots += 1
-                continue
-
-            # Validate platform configuration
+    def _terminate_children(reason: str = "shutdown") -> None:
+        """Terminate any spawned child processes quickly and safely."""
+        if not processes:
+            return
+        logging.info(f"Terminating {len(processes)} child process(es) due to {reason}…")
+        for p in processes:
             try:
-                platform = get_platform_from_config(cfg)
+                if p.is_alive():
+                    logging.info(f"Sending SIGTERM to {p.name} (pid={p.pid})")
+                    p.terminate()
+            except Exception as e:
+                logging.warning(f"Failed to terminate {p.name}: {e}")
+        # Give them a brief moment to exit cleanly
+        for p in processes:
+            try:
+                p.join(timeout=3)
+            except Exception:
+                pass
+        # Hard kill any stubborn children
+        for p in processes:
+            try:
+                if p.is_alive():
+                    logging.warning(f"Force killing {p.name} (pid={p.pid})")
+                    p.kill()
+                    p.join(timeout=2)
+            except Exception as e:
+                logging.warning(f"Failed to kill {p.name}: {e}")
 
-                # Check platform support
-                from platforms import platform_factory
+    try:
+        for file in bot_files:
+            try:
+                cfg = load_bot_config(str(file))
+                bot_name = cfg.get("name", file.stem)
 
-                if not platform_factory.registry.is_platform_supported(platform):
-                    logging.error(
-                        f"Platform {platform.value} is not supported for bot '{bot_name}'. Available platforms: {[p.value for p in platform_factory.get_supported_platforms()]}"
+                # Skip bots with enabled=False
+                if not cfg.get("enabled", True):
+                    logging.info(f"Skipping disabled bot '{bot_name}'")
+                    skipped_bots += 1
+                    continue
+
+                # Validate platform configuration
+                try:
+                    platform = get_platform_from_config(cfg)
+
+                    # Check platform support
+                    from platforms import platform_factory
+
+                    if not platform_factory.registry.is_platform_supported(platform):
+                        logging.error(
+                            f"Platform {platform.value} is not supported for bot '{bot_name}'. Available platforms: {[p.value for p in platform_factory.get_supported_platforms()]}"
+                        )
+                        skipped_bots += 1
+                        continue
+
+                    # Validate listener compatibility
+                    listener_type = cfg["filters"]["listener_type"]
+                    if not validate_platform_listener_combination(platform, listener_type):
+                        from config_loader import get_supported_listeners_for_platform
+
+                        supported = get_supported_listeners_for_platform(platform)
+                        logging.error(
+                            f"Listener '{listener_type}' is not compatible with platform '{platform.value}' for bot '{bot_name}'. Supported listeners: {supported}"
+                        )
+                        skipped_bots += 1
+                        continue
+
+                except Exception as e:
+                    logging.exception(
+                        f"Invalid platform configuration for bot '{bot_name}': {e}. Skipping..."
                     )
                     skipped_bots += 1
                     continue
 
-                # Validate listener compatibility
-                listener_type = cfg["filters"]["listener_type"]
-                if not validate_platform_listener_combination(platform, listener_type):
-                    from config_loader import get_supported_listeners_for_platform
-
-                    supported = get_supported_listeners_for_platform(platform)
-                    logging.error(
-                        f"Listener '{listener_type}' is not compatible with platform '{platform.value}' for bot '{bot_name}'. Supported listeners: {supported}"
+                # Start bot in separate process or main process
+                if cfg.get("separate_process", False):
+                    logging.info(
+                        f"Starting bot '{bot_name}' ({platform.value}) in separate process"
                     )
-                    skipped_bots += 1
-                    continue
+                    p = multiprocessing.Process(
+                        target=run_bot_process, args=(str(file),), name=f"bot-{bot_name}"
+                    )
+                    # Mark as daemon so children die with parent if abruptly interrupted
+                    p.daemon = True
+                    p.start()
+                    processes.append(p)
+                else:
+                    logging.info(
+                        f"Starting bot '{bot_name}' ({platform.value}) in main process"
+                    )
+                    asyncio.run(start_bot(str(file)))
 
             except Exception as e:
-                logging.exception(
-                    f"Invalid platform configuration for bot '{bot_name}': {e}. Skipping..."
-                )
+                logging.exception(f"Failed to start bot from {file}: {e}")
                 skipped_bots += 1
-                continue
 
-            # Start bot in separate process or main process
-            if cfg.get("separate_process", False):
-                logging.info(
-                    f"Starting bot '{bot_name}' ({platform.value}) in separate process"
-                )
-                p = multiprocessing.Process(
-                    target=run_bot_process, args=(str(file),), name=f"bot-{bot_name}"
-                )
-                p.start()
-                processes.append(p)
-            else:
-                logging.info(
-                    f"Starting bot '{bot_name}' ({platform.value}) in main process"
-                )
-                asyncio.run(start_bot(str(file)))
+        logging.info(
+            f"Started {len(bot_files) - skipped_bots} bots, skipped {skipped_bots} disabled/invalid bots"
+        )
 
-        except Exception as e:
-            logging.exception(f"Failed to start bot from {file}: {e}")
-            skipped_bots += 1
+        # Wait for all processes to complete
+        for p in processes:
+            p.join()
+            logging.info(f"Process {p.name} completed")
 
-    logging.info(
-        f"Started {len(bot_files) - skipped_bots} bots, skipped {skipped_bots} disabled/invalid bots"
-    )
-
-    # Wait for all processes to complete
-    for p in processes:
-        p.join()
-        logging.info(f"Process {p.name} completed")
+    except KeyboardInterrupt:
+        logging.info("SIGINT received — initiating shutdown…")
+        _terminate_children("SIGINT")
+        # Exit with 130 to indicate Ctrl+C
+        sys.exit(130)
+    except SystemExit as e:
+        # Propagate sys.exit from inner layers
+        _terminate_children("SystemExit")
+        raise e
+    except Exception:
+        logging.exception("Unhandled exception in run_all_bots; terminating children and exiting…")
+        _terminate_children("exception")
+        raise
+    finally:
+        # Best-effort cleanup
+        _terminate_children("finalize")
 
 
 def main() -> None:

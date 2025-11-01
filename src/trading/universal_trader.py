@@ -310,20 +310,49 @@ class UniversalTrader:
                 )
                 processor_task = asyncio.create_task(self._process_token_queue())
 
-                try:
-                    await self.token_listener.listen_for_tokens(
+                # Run listener in a background task so we can cancel it on shutdown
+                listener_task = asyncio.create_task(
+                    self.token_listener.listen_for_tokens(
                         lambda token: self._queue_token(token),
                         self.match_string,
                         self.bro_address,
                     )
-                except Exception:
-                    logger.exception("Token listening stopped due to error")
+                )
+
+                # Wait until either shutdown is requested or the listener exits unexpectedly
+                shutdown_wait_task = asyncio.create_task(self._shutdown_event.wait())
+
+                try:
+                    done, pending = await asyncio.wait(
+                        {listener_task, shutdown_wait_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+
+                    # If shutdown was requested, cancel the listener
+                    if shutdown_wait_task in done and self._shutdown:
+                        logger.info("Shutdown requested — cancelling listener and processor…")
+                        listener_task.cancel()
+                    # If listener stopped on its own, log it
+                    if listener_task in done and not listener_task.cancelled():
+                        try:
+                            await listener_task
+                        except Exception:
+                            logger.exception("Token listening stopped due to error")
+                        else:
+                            logger.info("Token listener exited.")
+
                 finally:
-                    processor_task.cancel()
-                    try:
-                        await processor_task
-                    except asyncio.CancelledError:
-                        pass
+                    # Ensure tasks are cancelled and awaited briefly
+                    for t in (listener_task, processor_task, shutdown_wait_task):
+                        if t and not t.done():
+                            t.cancel()
+                    for t in (listener_task, processor_task):
+                        try:
+                            await asyncio.wait_for(t, timeout=2)
+                        except asyncio.TimeoutError:
+                            logger.warning("Task did not shut down within timeout; proceeding anyway.")
+                        except asyncio.CancelledError:
+                            pass
 
         except Exception:
             logger.exception("Trading stopped due to error")
