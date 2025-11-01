@@ -1137,6 +1137,16 @@ class UniversalTrader:
             trades_dir = Path("trades")
             trades_dir.mkdir(exist_ok=True)
 
+            # Compute a simple SOL value estimate from price*amount for visibility
+            # Note: For buys in extreme-fast mode, price is synthetic (amount/token_target),
+            # but this still provides a reasonable order-of-magnitude check.
+            approx_sol_value = None
+            try:
+                if price is not None and amount is not None:
+                    approx_sol_value = float(price) * float(amount)
+            except Exception:
+                approx_sol_value = None
+
             log_entry = {
                 "timestamp": datetime.utcnow().isoformat(),
                 "action": action,
@@ -1147,6 +1157,15 @@ class UniversalTrader:
                 "amount": amount,
                 "tx_hash": str(tx_hash) if tx_hash else None,
             }
+
+            # Include SOL spend/receive hints to reduce confusion when reading logs
+            if approx_sol_value is not None:
+                log_entry["approx_sol_value"] = approx_sol_value
+            # For buys, also log configured SOL spend (budget) for clarity
+            if action == "buy":
+                # self.buy_amount is configured SOL to spend per trade
+                if hasattr(self, "buy_amount") and self.buy_amount is not None:
+                    log_entry["configured_spend_sol"] = float(self.buy_amount)
 
             log_file_path = trades_dir / "trades.log"
             with log_file_path.open("a", encoding="utf-8") as log_file:
