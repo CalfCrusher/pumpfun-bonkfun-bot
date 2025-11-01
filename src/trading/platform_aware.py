@@ -3,6 +3,7 @@ Platform-aware trader implementations that use the interface system.
 Final cleanup removing all platform-specific hardcoding.
 """
 
+import asyncio
 from solders.pubkey import Pubkey
 
 from core.client import SolanaClient
@@ -13,6 +14,7 @@ from interfaces.core import AddressProvider, Platform, TokenInfo
 from platforms import get_platform_implementations
 from trading.base import Trader, TradeResult
 from utils.logger import get_logger
+from solana.rpc.core import RPCException
 
 logger = get_logger(__name__)
 
@@ -208,9 +210,31 @@ class PlatformAwareSeller(Trader):
                 self.wallet.pubkey, token_info.mint
             )
 
-            token_balance = await self.client.get_token_account_balance(
-                user_token_account
-            )
+            # Fetch token balance with retries to handle eventual consistency right after buys
+            token_balance: int | None = None
+            last_error: Exception | None = None
+            for attempt in range(6):
+                try:
+                    token_balance = await self.client.get_token_account_balance(
+                        user_token_account
+                    )
+                    break
+                except RPCException as e:
+                    # Common transient immediately after ATA creation/transfer
+                    if "could not find account" in str(e).lower() and attempt < 5:
+                        wait = 0.4 * (attempt + 1)
+                        logger.debug(
+                            f"Token account not yet visible ({user_token_account}), retry {attempt+1}/6 in {wait:.1f}s"
+                        )
+                        await asyncio.sleep(wait)
+                        last_error = e
+                        continue
+                    last_error = e
+                    break
+            if token_balance is None:
+                raise last_error or RuntimeError(
+                    "Failed to fetch token account balance"
+                )
             token_balance_decimal = token_balance / 10**TOKEN_DECIMALS
 
             logger.info(f"Token balance: {token_balance_decimal}")
@@ -227,7 +251,7 @@ class PlatformAwareSeller(Trader):
             pool_address = self._get_pool_address(token_info, address_provider)
             token_price_sol = await curve_manager.calculate_price(pool_address)
 
-            logger.info(f"Price per Token: {token_price_sol:.8f} SOL")
+            logger.info(f"Price: {token_price_sol:.8f} SOL per token")
 
             # Calculate expected SOL output
             expected_sol_output = token_balance_decimal * token_price_sol

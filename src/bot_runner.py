@@ -89,6 +89,11 @@ async def start_bot(config_path: str):
             stop_loss_percentage=cfg["trade"].get("stop_loss_percentage"),
             max_hold_time=cfg["trade"].get("max_hold_time"),
             price_check_interval=cfg["trade"].get("price_check_interval", 10),
+            # Debounce safeguards (optional)
+            min_hold_before_stop_seconds=cfg["trade"].get(
+                "min_hold_before_stop_seconds", 2
+            ),
+            stop_loss_confirmations=cfg["trade"].get("stop_loss_confirmations", 2),
             # Listener configuration
             listener_type=cfg["filters"]["listener_type"],
             # Geyser configuration (if applicable)
@@ -135,6 +140,9 @@ async def start_bot(config_path: str):
             bro_address=cfg["filters"].get("bro_address"),
             marry_mode=cfg["filters"].get("marry_mode", False),
             yolo_mode=cfg["filters"].get("yolo_mode", False),
+            min_market_cap_sol=cfg["filters"].get("min_market_cap_sol", 0.0),
+            min_real_liquidity_sol=cfg["filters"].get("min_real_liquidity_sol"),
+            wait_before_buy=cfg["filters"].get("wait_before_buy", 0),
             # Compute unit configuration
             compute_units=cfg.get("compute_units", {}),
         )

@@ -131,10 +131,22 @@ class UniversalLogsListener(BaseTokenListener):
 
                             await token_callback(token_info)
 
+                    except asyncio.CancelledError:
+                        # Graceful shutdown on external cancellation
+                        try:
+                            ping_task.cancel()
+                        except Exception:
+                            pass
+                        logger.info("Logs listener task cancelled. Closing websocket and exiting listen loop...")
+                        raise
                     except websockets.exceptions.ConnectionClosed:
                         logger.warning("WebSocket connection closed. Reconnecting...")
                         ping_task.cancel()
 
+            except asyncio.CancelledError:
+                # Propagate cancellation upward so callers can stop awaiting
+                logger.info("Logs listener cancelled. Exiting...")
+                return
             except Exception:
                 logger.exception("WebSocket connection error")
                 logger.info("Reconnecting in 5 seconds...")

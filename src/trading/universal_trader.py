@@ -4,6 +4,7 @@ Cleaned up to remove all platform-specific hardcoding.
 """
 
 import asyncio
+import signal
 import json
 from datetime import datetime
 from pathlib import Path
@@ -61,6 +62,9 @@ class UniversalTrader:
         stop_loss_percentage: float | None = None,
         max_hold_time: int | None = None,
         price_check_interval: int = 10,
+    # Exit strategy safety (debounce) options
+    min_hold_before_stop_seconds: int = 2,
+    stop_loss_confirmations: int = 2,
         # Priority fee configuration
         enable_dynamic_priority_fee: bool = False,
         enable_fixed_priority_fee: bool = True,
@@ -83,6 +87,10 @@ class UniversalTrader:
         bro_address: str | None = None,
         marry_mode: bool = False,
         yolo_mode: bool = False,
+        # Liquidity filtering
+        min_market_cap_sol: float = 0.0,  # deprecated alias, kept for backward compatibility
+        min_real_liquidity_sol: float | None = None,
+        wait_before_buy: int = 0,
         # Compute unit configuration
         compute_units: dict | None = None,
     ):
@@ -172,6 +180,9 @@ class UniversalTrader:
         self.stop_loss_percentage = stop_loss_percentage
         self.max_hold_time = max_hold_time
         self.price_check_interval = price_check_interval
+        # Debounce safeguards
+        self.min_hold_before_stop_seconds = max(0, min_hold_before_stop_seconds)
+        self.stop_loss_confirmations = max(1, stop_loss_confirmations)
 
         # Timing parameters
         self.wait_time_after_creation = wait_time_after_creation
@@ -190,6 +201,16 @@ class UniversalTrader:
         self.bro_address = bro_address
         self.marry_mode = marry_mode
         self.yolo_mode = yolo_mode
+        
+        # Liquidity filtering configuration
+        # Prefer explicit real-liquidity threshold when provided; otherwise fall back to the legacy
+        # min_market_cap_sol value for backward compatibility.
+        self.min_liquidity_sol = (
+            float(min_real_liquidity_sol)
+            if (min_real_liquidity_sol is not None and min_real_liquidity_sol > 0)
+            else float(min_market_cap_sol)
+        )
+        self.wait_before_buy = wait_before_buy
 
         # State tracking
         self.traded_mints: set[Pubkey] = set()
@@ -197,6 +218,22 @@ class UniversalTrader:
         self.processing: bool = False
         self.processed_tokens: set[str] = set()
         self.token_timestamps: dict[str, float] = {}
+        # Shutdown control
+        self._shutdown: bool = False
+        self._shutdown_event: asyncio.Event = asyncio.Event()
+
+    def _request_shutdown(self) -> None:
+        """Signal-safe request to stop operations ASAP."""
+        if not self._shutdown:
+            logger.info("Shutdown requested. Halting new token acceptance and trades...")
+            self._shutdown = True
+            try:
+                # Wake any waiters (e.g., token waiter) immediately
+                self._shutdown_event.set()
+            except Exception:
+                logger.debug("Failed to set shutdown event", exc_info=True)
+        else:
+            logger.debug("Shutdown already in progress.")
 
     async def start(self) -> None:
         """Start the trading bot and listen for new tokens."""
@@ -223,6 +260,22 @@ class UniversalTrader:
             )
 
         logger.info(f"Max token age: {self.max_token_age} seconds")
+        # Visibility for liquidity filtering configuration
+        logger.info(
+            f"Liquidity filter (real reserves preferred): min {self.min_liquidity_sol} SOL, wait_before_buy: {self.wait_before_buy}s"
+        )
+
+        # Setup signal handlers to ensure we don't buy after user interruption
+        try:
+            loop = asyncio.get_running_loop()
+            try:
+                loop.add_signal_handler(signal.SIGINT, self._request_shutdown)
+                loop.add_signal_handler(signal.SIGTERM, self._request_shutdown)
+            except NotImplementedError:
+                # Signal handlers may not be available on some platforms
+                pass
+        except Exception:
+            logger.debug("Failed to set up signal handlers", exc_info=True)
 
         try:
             health_resp = await self.solana_client.get_health()
@@ -238,7 +291,12 @@ class UniversalTrader:
                     "Running in single token mode - will process one token and exit"
                 )
                 token_info = await self._wait_for_token()
-                if token_info:
+                if self._shutdown:
+                    logger.info("Shutdown requested before handling token. Aborting...")
+                elif token_info:
+                    logger.info(
+                        f"Invoking buy pipeline for: {token_info.symbol} ({token_info.mint})"
+                    )
                     await self._handle_token(token_info)
                     logger.info("Finished processing single token. Exiting...")
                 else:
@@ -284,12 +342,122 @@ class UniversalTrader:
             nonlocal found_token
             token_key = str(token.mint)
 
+            # If we've already selected a token for this cycle, ignore others
+            if found_token is not None or token_found.is_set():
+                logger.debug(
+                    f"Ignoring {token.symbol} - token already selected for this cycle"
+                )
+                return
+
+            # Do not accept new tokens when shutting down
+            if self._shutdown:
+                logger.info(f"Ignoring token {token.symbol} due to shutdown request")
+                return
+
             # Only process if not already processed and fresh
             if token_key not in self.processed_tokens:
-                # Record when the token was discovered
+                # LIQUIDITY FILTERING - Check BEFORE accepting token
+                if self.wait_before_buy > 0 and self.min_liquidity_sol > 0:
+                    try:
+                        logger.info(f"New token detected: {token.symbol}. Waiting {self.wait_before_buy}s to check liquidity...")
+                        await asyncio.sleep(self.wait_before_buy)
+
+                        if self._shutdown:
+                            logger.info("Shutdown requested during wait. Skipping token.")
+                            self.processed_tokens.add(token_key)
+                            return
+                        
+                        curve_manager = self.platform_implementations.curve_manager
+                        address_provider = self.platform_implementations.address_provider
+
+                        # Try multiple candidate addresses for early curve reads
+                        candidates: list[Pubkey] = []
+                        if getattr(token, "bonding_curve", None):
+                            candidates.append(token.bonding_curve)
+                        if getattr(token, "associated_bonding_curve", None):
+                            candidates.append(token.associated_bonding_curve)
+                        # Derive associated bonding curve if not present
+                        if getattr(token, "bonding_curve", None) and getattr(token, "mint", None):
+                            try:
+                                derived = address_provider.derive_associated_bonding_curve(
+                                    token.mint, token.bonding_curve
+                                )
+                                if derived and derived not in candidates:
+                                    candidates.append(derived)
+                            except Exception:
+                                logger.debug("Failed to derive associated bonding curve", exc_info=True)
+
+                        pool_state: dict | None = None
+                        used_address: Pubkey | None = None
+                        for addr in candidates:
+                            try:
+                                pool_state = await curve_manager.get_pool_state(addr)
+                                used_address = addr
+                                break
+                            except Exception:
+                                continue
+
+                        if pool_state is not None:
+                            # Prefer REAL SOL reserves as a proxy for actual on-chain liquidity.
+                            # Fall back to virtual reserves if real reserves are not yet available.
+                            real_sol_reserves_lamports = pool_state.get("real_sol_reserves", 0)
+                            virtual_sol_reserves_lamports = pool_state.get("virtual_sol_reserves", 0)
+
+                            liquidity_sol = (
+                                real_sol_reserves_lamports / 1_000_000_000
+                                if real_sol_reserves_lamports and real_sol_reserves_lamports > 0
+                                else virtual_sol_reserves_lamports / 1_000_000_000
+                            )
+
+                            logger.info(
+                                (
+                                    "Token %s liquidity check: %.4f SOL "
+                                    "(real_sol_reserves: %s lamports, virtual_sol_reserves: %s lamports) [addr: %s]"
+                                )
+                                % (
+                                    token.symbol,
+                                    liquidity_sol,
+                                    real_sol_reserves_lamports,
+                                    virtual_sol_reserves_lamports,
+                                    used_address,
+                                )
+                            )
+
+                            if liquidity_sol < self.min_liquidity_sol:
+                                logger.info(
+                                    f"Liquidity check FAILED for {token.symbol}: {liquidity_sol:.4f} SOL < {self.min_liquidity_sol} SOL"
+                                )
+                                logger.info(
+                                    f"Skipping {token.symbol} - Liquidity {liquidity_sol:.4f} SOL below minimum {self.min_liquidity_sol} SOL"
+                                )
+                                self.processed_tokens.add(token_key)
+                                return
+                            else:
+                                logger.info(
+                                    f"Liquidity check passed: {liquidity_sol:.4f} SOL >= {self.min_liquidity_sol} SOL"
+                                )
+                        else:
+                            logger.warning(
+                                f"Liquidity check unavailable for {token.symbol}: no readable curve state (tried {len(candidates)} address(es)). Skipping token for safety."
+                            )
+                            self.processed_tokens.add(token_key)
+                            return
+                    except Exception as e:
+                        logger.warning(f"Failed to check liquidity for {token.symbol}: {e}. Skipping token for safety.")
+                        self.processed_tokens.add(token_key)
+                        return
+                
+                # Token passed all filters - accept it
+                if self._shutdown:
+                    logger.info("Shutdown requested after checks. Not accepting token.")
+                    self.processed_tokens.add(token_key)
+                    return
                 self.token_timestamps[token_key] = monotonic()
                 found_token = token
                 self.processed_tokens.add(token_key)
+                logger.info(
+                    f"Accepted token after checks: {token.symbol} ({token.mint}). Proceeding to buy pipeline."
+                )
                 token_found.set()
 
         listener_task = asyncio.create_task(
@@ -300,23 +468,47 @@ class UniversalTrader:
             )
         )
 
-        # Wait for a token with a timeout
+        # Wait for a token or shutdown, with timeout
         try:
             logger.info(
                 f"Waiting for a suitable token (timeout: {self.token_wait_timeout}s)..."
             )
-            await asyncio.wait_for(token_found.wait(), timeout=self.token_wait_timeout)
-            logger.info(f"Found token: {found_token.symbol} ({found_token.mint})")
-            return found_token
-        except TimeoutError:
+            token_wait_task = asyncio.create_task(token_found.wait())
+            shutdown_wait_task = asyncio.create_task(self._shutdown_event.wait())
+
+            done, pending = await asyncio.wait(
+                {token_wait_task, shutdown_wait_task},
+                timeout=self.token_wait_timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            # Cancel any pending waiters
+            for p in pending:
+                p.cancel()
+
+            if shutdown_wait_task in done and self._shutdown:
+                logger.info("Shutdown requested while waiting for token. Exiting wait early.")
+                return None
+
+            if token_wait_task in done and token_found.is_set() and found_token is not None:
+                logger.info(f"Found token: {found_token.symbol} ({found_token.mint})")
+                if self._shutdown:
+                    logger.info("Shutdown requested before returning token. Ignoring token.")
+                    return None
+                return found_token
+
             logger.info(
                 f"Timed out after waiting {self.token_wait_timeout}s for a token"
             )
             return None
         finally:
+            # Ensure listener is cancelled promptly to proceed to buy pipeline
             listener_task.cancel()
             try:
-                await listener_task
+                # Don't hang indefinitely if listener misbehaves on cancel
+                await asyncio.wait_for(listener_task, timeout=2)
+            except asyncio.TimeoutError:
+                logger.warning("Listener task did not shut down within timeout; proceeding anyway.")
             except asyncio.CancelledError:
                 pass
 
@@ -363,6 +555,9 @@ class UniversalTrader:
         """Continuously process tokens from the queue, only if they're fresh."""
         while True:
             try:
+                if self._shutdown:
+                    logger.info("Shutdown requested. Stopping token queue processing...")
+                    break
                 token_info = await self.token_queue.get()
                 token_key = str(token_info.mint)
 
@@ -378,6 +573,100 @@ class UniversalTrader:
                     )
                     continue
 
+                # LIQUIDITY FILTERING for YOLO/queue mode
+                # Ensure we also enforce the same pre-acceptance liquidity check here
+                # so continuous mode behaves safely like single-token mode.
+                if self.wait_before_buy > 0 and self.min_liquidity_sol > 0:
+                    try:
+                        logger.info(
+                            f"New token detected (queue): {token_info.symbol}. Waiting {self.wait_before_buy}s to check liquidity..."
+                        )
+                        await asyncio.sleep(self.wait_before_buy)
+
+                        if self._shutdown:
+                            logger.info("Shutdown requested during wait. Skipping token from queue.")
+                            self.processed_tokens.add(token_key)
+                            continue
+
+                        curve_manager = self.platform_implementations.curve_manager
+                        address_provider = self.platform_implementations.address_provider
+
+                        candidates: list[Pubkey] = []
+                        if getattr(token_info, "bonding_curve", None):
+                            candidates.append(token_info.bonding_curve)
+                        if getattr(token_info, "associated_bonding_curve", None):
+                            candidates.append(token_info.associated_bonding_curve)
+                        if getattr(token_info, "bonding_curve", None) and getattr(token_info, "mint", None):
+                            try:
+                                derived = address_provider.derive_associated_bonding_curve(
+                                    token_info.mint, token_info.bonding_curve
+                                )
+                                if derived and derived not in candidates:
+                                    candidates.append(derived)
+                            except Exception:
+                                logger.debug("Failed to derive associated bonding curve", exc_info=True)
+
+                        pool_state: dict | None = None
+                        used_address: Pubkey | None = None
+                        for addr in candidates:
+                            try:
+                                pool_state = await curve_manager.get_pool_state(addr)
+                                used_address = addr
+                                break
+                            except Exception:
+                                continue
+
+                        if pool_state is not None:
+                            real_sol_reserves_lamports = pool_state.get("real_sol_reserves", 0)
+                            virtual_sol_reserves_lamports = pool_state.get("virtual_sol_reserves", 0)
+
+                            liquidity_sol = (
+                                real_sol_reserves_lamports / 1_000_000_000
+                                if real_sol_reserves_lamports and real_sol_reserves_lamports > 0
+                                else virtual_sol_reserves_lamports / 1_000_000_000
+                            )
+
+                            logger.info(
+                                (
+                                    "Token %s liquidity check: %.4f SOL "
+                                    "(real_sol_reserves: %s lamports, virtual_sol_reserves: %s lamports) [addr: %s]"
+                                )
+                                % (
+                                    token_info.symbol,
+                                    liquidity_sol,
+                                    real_sol_reserves_lamports,
+                                    virtual_sol_reserves_lamports,
+                                    used_address,
+                                )
+                            )
+
+                            if liquidity_sol < self.min_liquidity_sol:
+                                logger.info(
+                                    f"Liquidity check FAILED for {token_info.symbol}: {liquidity_sol:.4f} SOL < {self.min_liquidity_sol} SOL"
+                                )
+                                logger.info(
+                                    f"Skipping {token_info.symbol} - Liquidity {liquidity_sol:.4f} SOL below minimum {self.min_liquidity_sol} SOL"
+                                )
+                                self.processed_tokens.add(token_key)
+                                continue
+                            else:
+                                logger.info(
+                                    f"Liquidity check passed: {liquidity_sol:.4f} SOL >= {self.min_liquidity_sol} SOL"
+                                )
+                        else:
+                            logger.warning(
+                                f"Liquidity check unavailable for {token_info.symbol}: no readable curve state (tried {len(candidates)} address(es)). Skipping token for safety."
+                            )
+                            self.processed_tokens.add(token_key)
+                            continue
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to check liquidity for {token_info.symbol}: {e}. Skipping token for safety."
+                        )
+                        self.processed_tokens.add(token_key)
+                        continue
+
+                # Mark as processed only once we accept it
                 self.processed_tokens.add(token_key)
 
                 logger.info(
@@ -396,12 +685,23 @@ class UniversalTrader:
     async def _handle_token(self, token_info: TokenInfo) -> None:
         """Handle a new token creation event."""
         try:
+            logger.info(
+                f"Entered buy handler for {token_info.symbol} ({token_info.mint}) on {token_info.platform.value}"
+            )
+            if self._shutdown:
+                logger.info("Shutdown requested. Skipping buy operation.")
+                return
             # Validate that token is for our platform
             if token_info.platform != self.platform:
                 logger.warning(
                     f"Token platform mismatch: expected {self.platform.value}, got {token_info.platform.value}"
                 )
                 return
+
+            # CUSTOM MODIFICATION: Market cap filtering removed from here
+            # Market cap is now checked in _wait_for_token() callback BEFORE accepting token
+            # This ensures we check market cap immediately when token is detected, not later
+            # END CUSTOM MODIFICATION
 
             # Wait for pool/curve to stabilize (unless in extreme fast mode)
             if not self.extreme_fast_mode:
@@ -411,7 +711,80 @@ class UniversalTrader:
                 )
                 await asyncio.sleep(self.wait_time_after_creation)
 
-            # Buy token
+            # Final pre-buy safety: re-check liquidity without extra wait
+            # This protects against sudden rugs between detection and buy.
+            if self.min_liquidity_sol > 0:
+                try:
+                    logger.info(
+                        f"Beginning buy pipeline for {token_info.symbol} - performing pre-buy liquidity check"
+                    )
+                    curve_manager = self.platform_implementations.curve_manager
+                    address_provider = self.platform_implementations.address_provider
+                    
+                    # Try both bonding_curve and associated_bonding_curve for resilience
+                    candidates: list[Pubkey] = []
+                    if getattr(token_info, "bonding_curve", None):
+                        candidates.append(token_info.bonding_curve)
+                    if getattr(token_info, "associated_bonding_curve", None):
+                        candidates.append(token_info.associated_bonding_curve)
+                    if getattr(token_info, "bonding_curve", None) and getattr(token_info, "mint", None):
+                        try:
+                            derived = address_provider.derive_associated_bonding_curve(
+                                token_info.mint, token_info.bonding_curve
+                            )
+                            if derived and derived not in candidates:
+                                candidates.append(derived)
+                        except Exception:
+                            logger.debug("Failed to derive associated bonding curve", exc_info=True)
+
+                    pool_state: dict | None = None
+                    for addr in candidates:
+                        try:
+                            pool_state = await curve_manager.get_pool_state(addr)
+                            break
+                        except Exception:
+                            continue
+                    if pool_state is None:
+                        raise ValueError("Could not read curve state from any candidate address")
+                    real_sol_reserves_lamports = pool_state.get("real_sol_reserves", 0)
+                    virtual_sol_reserves_lamports = pool_state.get("virtual_sol_reserves", 0)
+                    liquidity_sol = (
+                        real_sol_reserves_lamports / 1_000_000_000
+                        if real_sol_reserves_lamports and real_sol_reserves_lamports > 0
+                        else virtual_sol_reserves_lamports / 1_000_000_000
+                    )
+                    logger.info(
+                        (
+                            "Pre-buy liquidity for %s: %.4f SOL "
+                            "(real_sol_reserves: %s lamports, virtual_sol_reserves: %s lamports)"
+                        )
+                        % (
+                            token_info.symbol,
+                            liquidity_sol,
+                            real_sol_reserves_lamports,
+                            virtual_sol_reserves_lamports,
+                        )
+                    )
+                    if liquidity_sol < self.min_liquidity_sol:
+                        logger.info(
+                            f"Pre-buy liquidity check FAILED for {token_info.symbol}: {liquidity_sol:.4f} SOL < {self.min_liquidity_sol} SOL"
+                        )
+                        logger.info(
+                            f"Aborting buy: Liquidity {liquidity_sol:.4f} SOL below minimum {self.min_liquidity_sol} SOL"
+                        )
+                        self.processed_tokens.add(str(token_info.mint))
+                        return
+                except Exception as e:
+                    logger.warning(
+                        f"Pre-buy liquidity check failed for {token_info.symbol}: {e}. Skipping buy for safety."
+                    )
+                    self.processed_tokens.add(str(token_info.mint))
+                    return
+
+            # Buy token (only if not shutting down)
+            if self._shutdown:
+                logger.info("Shutdown requested. Aborting buy.")
+                return
             logger.info(
                 f"Buying {self.buy_amount:.6f} SOL worth of {token_info.symbol} on {token_info.platform.value}..."
             )
@@ -479,11 +852,22 @@ class UniversalTrader:
         self, token_info: TokenInfo, buy_result: TradeResult
     ) -> None:
         """Handle take profit/stop loss exit strategy."""
+        # Determine an accurate entry price; in extreme-fast mode the buyer's price is synthetic
+        entry_price = buy_result.price
+        try:
+            pool_address = self._get_pool_address(token_info)
+            curve_manager = self.platform_implementations.curve_manager
+            refreshed_price = await curve_manager.calculate_price(pool_address)
+            if refreshed_price and refreshed_price > 0:
+                entry_price = refreshed_price
+        except Exception:
+            logger.debug("Could not refresh entry price post-buy; using reported price")
+
         # Create position
         position = Position.create_from_buy_result(
             mint=token_info.mint,
             symbol=token_info.symbol,
-            entry_price=buy_result.price,
+            entry_price=entry_price,
             quantity=buy_result.amount,
             take_profit_percentage=self.take_profit_percentage,
             stop_loss_percentage=self.stop_loss_percentage,
@@ -492,9 +876,13 @@ class UniversalTrader:
 
         logger.info(f"Created position: {position}")
         if position.take_profit_price:
-            logger.info(f"Take profit target: {position.take_profit_price:.8f} SOL")
+            logger.info(
+                f"Take profit target: {position.take_profit_price:.8f} SOL per token"
+            )
         if position.stop_loss_price:
-            logger.info(f"Stop loss target: {position.stop_loss_price:.8f} SOL")
+            logger.info(
+                f"Stop loss target: {position.stop_loss_price:.8f} SOL per token"
+            )
 
         # Monitor position until exit condition is met
         await self._monitor_position_until_exit(token_info, position)
@@ -543,17 +931,46 @@ class UniversalTrader:
         pool_address = self._get_pool_address(token_info)
         curve_manager = self.platform_implementations.curve_manager
 
+        # Debounce state for stop-loss confirmation
+        consecutive_stop_breaches = 0
+
         while position.is_active:
             try:
                 # Get current price from pool/curve
                 current_price = await curve_manager.calculate_price(pool_address)
 
+                # Skip invalid/glitch prices
+                if current_price <= 0:
+                    logger.debug("Ignoring non-positive price sample during monitoring")
+                    await asyncio.sleep(self.price_check_interval)
+                    continue
+
                 # Check if position should be exited
                 should_exit, exit_reason = position.should_exit(current_price)
 
                 if should_exit and exit_reason:
+                    # Apply debounce for stop-loss to avoid instant exit on noisy first sample
+                    if exit_reason.value == "stop_loss":
+                        elapsed = (datetime.utcnow() - position.entry_time).total_seconds()
+                        # Enforce minimum hold before stop-loss
+                        if elapsed < self.min_hold_before_stop_seconds:
+                            logger.debug(
+                                f"Stop-loss breach ignored during warm-up ({elapsed:.2f}s < {self.min_hold_before_stop_seconds}s)"
+                            )
+                            consecutive_stop_breaches = 0
+                            await asyncio.sleep(self.price_check_interval)
+                            continue
+
+                        consecutive_stop_breaches += 1
+                        if consecutive_stop_breaches < self.stop_loss_confirmations:
+                            logger.debug(
+                                f"Stop-loss breach {consecutive_stop_breaches}/{self.stop_loss_confirmations} — waiting for confirmation"
+                            )
+                            await asyncio.sleep(self.price_check_interval)
+                            continue
+
                     logger.info(f"Exit condition met: {exit_reason.value}")
-                    logger.info(f"Current price: {current_price:.8f} SOL")
+                    logger.info(f"Current price: {current_price:.8f} SOL per token")
 
                     # Log PnL before exit
                     pnl = position.get_pnl(current_price)
@@ -595,19 +1012,27 @@ class UniversalTrader:
                             self.cleanup_with_priority_fee,
                             self.cleanup_force_close_with_burn,
                         )
+                        # Done monitoring on successful exit
+                        break
                     else:
                         logger.error(
                             f"Failed to exit position: {sell_result.error_message}"
                         )
                         # Keep monitoring in case sell can be retried
-
-                    break
+                        # Reset breach counter to avoid immediate re-trigger spam
+                        consecutive_stop_breaches = 0
                 else:
                     # Log current status
                     pnl = position.get_pnl(current_price)
                     logger.debug(
-                        f"Position status: {current_price:.8f} SOL ({pnl['price_change_pct']:+.2f}%)"
+                        f"Position status: {current_price:.8f} SOL per token ({pnl['price_change_pct']:+.2f}%)"
                     )
+                    # Reset stop-loss breach counter if not currently breaching
+                    if (
+                        position.stop_loss_price is None
+                        or current_price > position.stop_loss_price
+                    ):
+                        consecutive_stop_breaches = 0
 
                 # Wait before next price check
                 await asyncio.sleep(self.price_check_interval)

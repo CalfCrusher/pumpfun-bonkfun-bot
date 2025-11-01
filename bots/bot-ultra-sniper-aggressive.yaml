@@ -1,0 +1,123 @@
+# Ultra-Fast Aggressive Sniper Bot
+# Strategy: Snipe first, exit fast with profit or cut losses quickly
+# Author: Custom configuration
+# WARNING: High-frequency trading mode - monitor closely!
+
+# Bot identification and connection settings
+name: "bot-ultra-sniper-aggressive"
+env_file: ".env"
+rpc_endpoint: "${SOLANA_NODE_RPC_ENDPOINT}"
+wss_endpoint: "${SOLANA_NODE_WSS_ENDPOINT}"
+private_key: "${SOLANA_PRIVATE_KEY}"
+
+enabled: true # Enabled for live trading (use with caution)
+separate_process: false # Run in foreground with live output
+
+# Options: "pump_fun" (default), "lets_bonk"
+platform: "pump_fun"
+
+# Geyser configuration (not used - using logs listener)
+geyser:
+  endpoint: "${GEYSER_ENDPOINT}"
+  api_token: "${GEYSER_API_TOKEN}"
+  auth_type: "x-token"
+
+# Trading parameters - AGGRESSIVE SETTINGS
+trade:
+  buy_amount: 0.006 # Spend 0.006 SOL per trade (~$1.20) - aligned with TEST
+  buy_slippage: 0.3 # 30% max price deviation on buy
+  sell_slippage: 0.3 # 30% max price deviation on sell
+
+  # Exit strategy: Take Profit / Stop Loss
+  exit_strategy: "tp_sl" # Options: "time_based", "tp_sl", "manual"
+  take_profit_percentage: 0.5 # Sell at +50% profit (0.5 = 50%)
+  stop_loss_percentage: 0.3 # Sell at -30% loss (0.3 = 30%)
+  max_hold_time: 5 # ULTRA-FAST: Hold maximum 5 seconds!
+  price_check_interval: 1 # Check price every 1 second (max frequency for 25 RPS)
+  # Debounce safeguards (aligned with TEST)
+  min_hold_before_stop_seconds: 3
+  stop_loss_confirmations: 2
+
+  # EXTREME FAST mode - Snipe immediately without price checks
+  extreme_fast_mode: true
+  extreme_fast_token_amount: 100 # Buy exactly 100 tokens per trade
+
+# Priority fee configuration - AGGRESSIVE for fast execution
+priority_fees:
+  enable_dynamic: false # Disabled to avoid extra RPC calls (saves RPS budget)
+  enable_fixed: true # Use fixed high priority fee
+  fixed_amount: 500_000 # 0.0005 SOL priority fee (high priority for fast inclusion)
+  extra_percentage: 0.0 # No extra percentage needed
+  hard_cap: 1_000_000 # Max 0.001 SOL priority fee cap
+
+# Compute unit limits for transaction processing
+compute_units:
+  # Using default CU limits: buy=100K, sell=60K
+  
+  # Account data size optimization (reduces CU cost and improves tx priority)
+  account_data_size: 512_000 # 512KB limit for optimization
+
+# Filters for token selection - AGGRESSIVE SNIPING
+filters:
+  match_string: null # Buy ALL tokens (no name filter)
+  bro_address: null # Buy from ANY creator (no creator filter)
+  listener_type: "logs" # Use logs listener (works with standard RPC)
+  max_token_age: 0.001 # Only snipe tokens less than 0.001 seconds old (ULTRA FRESH!)
+  marry_mode: false # Auto-sell enabled (don't hold forever)
+  yolo_mode: true # CONTINUOUS MODE - Trade all matching tokens non-stop!
+
+  # Liquidity filtering (real reserves preferred)
+  min_real_liquidity_sol: 15.0   # Minimum REAL SOL liquidity to buy (preferred)
+  min_market_cap_sol: 15.0       # Legacy/backup key; ignored if min_real_liquidity_sol is set
+  wait_before_buy: 5             # Wait N seconds after detection to check liquidity (faster; still stabilizes)
+
+# Retry and timeout settings
+retries:
+  max_attempts: 1 # Single attempt per trade (speed over retries)
+  wait_after_creation: 0 # No wait - extreme fast mode handles this
+  wait_after_buy: 5 # Wait 5 seconds after buy before starting price checks
+  wait_before_new_token: 2 # Only 2 second pause between trades (rapid fire!)
+
+# Token and account management
+cleanup:
+  # Cleanup empty token accounts after trading session ends
+  mode: "post_session" # Options: "disabled", "on_fail", "after_sell", "post_session"
+  force_close_with_burn: false # Don't burn remaining dust
+  with_priority_fee: false # No priority fee for cleanup (save SOL)
+
+# Node provider configuration
+node:
+  max_rps: 25 # Chainstack free tier limit: 25 requests per second
+
+# ============================================================================
+# PERFORMANCE NOTES
+# ============================================================================
+# With these settings, your RPS usage per token will be approximately:
+# 
+# - Token detection: 1-2 RPS (continuous WebSocket listening)
+# - Buy transaction: 2-3 RPS (send + confirm)
+# - Price checks: 1 RPS (every 1 second for 5 seconds max)
+# - Sell transaction: 2-3 RPS (send + confirm)
+# 
+# Total per token: ~8-12 RPS peak during active trading
+# 
+# This leaves headroom for multiple simultaneous trades in YOLO mode
+# while staying under the 25 RPS limit.
+# ============================================================================
+
+# ============================================================================
+# RISK WARNINGS
+# ============================================================================
+# ⚠️  YOLO MODE ENABLED - Bot will trade continuously!
+# ⚠️  5 SECOND HOLD TIME - Very aggressive, high win/loss rate
+# ⚠️  NO FILTERS - Bot will buy EVERY new token it detects
+# ⚠️  HIGH FREQUENCY - Could execute 10+ trades per minute
+# ⚠️  SLIPPAGE RISK - First buyers often face high slippage
+# 
+# RECOMMENDATIONS:
+# 1. Start with enabled: false and test with ONE token first
+# 2. Monitor the first 5-10 trades closely
+# 3. Keep sufficient SOL balance (0.5+ SOL recommended)
+# 4. Watch for RPC rate limiting
+# 5. Consider adding match_string or bro_address filters to reduce trade volume
+# ============================================================================

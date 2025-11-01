@@ -5,6 +5,8 @@ This module handles pump.fun-specific bonding curve operations
 by implementing the CurveManager interface using IDL-based decoding.
 """
 
+import asyncio
+
 from typing import Any
 
 from solders.pubkey import Pubkey
@@ -47,19 +49,44 @@ class PumpFunCurveManager(CurveManager):
         Returns:
             Dictionary containing bonding curve state data
         """
-        try:
-            account = await self.client.get_account_info(pool_address)
-            if not account.data:
-                raise ValueError(f"No data in bonding curve account {pool_address}")
+        # Newly created bonding curve accounts can take a moment to appear.
+        # Retry briefly and avoid noisy tracebacks for expected transient states.
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                account = await self.client.get_account_info(pool_address)
+                if not account.data:
+                    raise ValueError(
+                        f"No data in bonding curve account {pool_address}"
+                    )
 
-            # Decode bonding curve state using injected IDL parser
-            curve_state_data = self._decode_curve_state_with_idl(account.data)
+                # Decode bonding curve state using injected IDL parser
+                curve_state_data = self._decode_curve_state_with_idl(account.data)
 
-            return curve_state_data
+                return curve_state_data
 
-        except Exception as e:
-            logger.exception("Failed to get curve state")
-            raise ValueError(f"Invalid bonding curve state: {e!s}")
+            except ValueError as ve:
+                msg = str(ve)
+                # Expected transient: account not yet found or empty right after creation
+                if (
+                    "not found" in msg.lower() or "no data" in msg.lower()
+                ) and attempt < 2:
+                    logger.debug(
+                        f"Bonding curve not ready yet ({pool_address}), attempt {attempt + 1}/3: {msg}. Retrying..."
+                    )
+                    await asyncio.sleep(0.5 * (attempt + 1))
+                    continue
+                last_error = ve
+                break
+            except Exception as e:  # Unexpected errors
+                last_error = e
+                break
+
+        # Log a concise warning instead of a full traceback to reduce noise
+        logger.warning(
+            f"Failed to get curve state for {pool_address}: {last_error!s}"
+        )
+        raise ValueError(f"Invalid bonding curve state: {last_error!s}")
 
     async def calculate_price(self, pool_address: Pubkey) -> float:
         """Calculate current token price from bonding curve state.
