@@ -24,7 +24,7 @@ geyser:
 
 # Trading parameters - AGGRESSIVE SETTINGS
 trade:
-  buy_amount: 0.006 # Spend 0.006 SOL per trade (~$1.20) - aligned with TEST
+  buy_amount: 0.02 # Spend 0.02 SOL per trade
   buy_slippage: 0.3 # 30% max price deviation on buy
   sell_slippage: 0.3 # 30% max price deviation on sell
 
