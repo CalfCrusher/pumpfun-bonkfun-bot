@@ -32,6 +32,8 @@ class PlatformAwareBuyer(Trader):
         max_retries: int = 5,
         extreme_fast_token_amount: int = 0,
         extreme_fast_mode: bool = False,
+        # Absolute safety guard (configured in SOL, stored as lamports)
+        max_spend_lamports: int | None = None,
         compute_units: dict | None = None,
     ):
         """Initialize platform-aware token buyer."""
@@ -43,6 +45,7 @@ class PlatformAwareBuyer(Trader):
         self.max_retries = max_retries
         self.extreme_fast_mode = extreme_fast_mode
         self.extreme_fast_token_amount = extreme_fast_token_amount
+        self.max_spend_lamports = max_spend_lamports
         self.compute_units = compute_units or {}
 
     async def execute(self, token_info: TokenInfo) -> TradeResult:
@@ -79,6 +82,15 @@ class PlatformAwareBuyer(Trader):
 
             # Calculate maximum SOL to spend with slippage
             max_amount_lamports = int(amount_lamports * (1 + self.slippage))
+            # Apply hard cap if configured (take the most conservative)
+            if self.max_spend_lamports is not None:
+                if max_amount_lamports > self.max_spend_lamports:
+                    logger.warning(
+                        "Applying hard spend cap: requested %.9f SOL (with slippage) > cap %.9f SOL",
+                        max_amount_lamports / LAMPORTS_PER_SOL,
+                        self.max_spend_lamports / LAMPORTS_PER_SOL,
+                    )
+                max_amount_lamports = min(max_amount_lamports, self.max_spend_lamports)
 
             # Build buy instructions using platform-specific builder
             instructions = await instruction_builder.build_buy_instruction(

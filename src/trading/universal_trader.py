@@ -65,6 +65,7 @@ class UniversalTrader:
     # Exit strategy safety (debounce) options
     min_hold_before_stop_seconds: int = 2,
     stop_loss_confirmations: int = 2,
+    take_profit_confirmations: int = 1,
         # Priority fee configuration
         enable_dynamic_priority_fee: bool = False,
         enable_fixed_priority_fee: bool = True,
@@ -93,6 +94,8 @@ class UniversalTrader:
         wait_before_buy: int = 0,
         # Compute unit configuration
         compute_units: dict | None = None,
+        # Absolute hard cap for SOL spent per trade (in SOL). If None, no extra cap.
+        max_spend_sol_hard_cap: float | None = None,
     ):
         """Initialize the universal trader."""
         # Core components
@@ -134,6 +137,13 @@ class UniversalTrader:
         self.compute_units = compute_units or {}
 
         # Create platform-aware traders
+        # Compute lamport cap once (if provided)
+        max_spend_lamports = (
+            int(max_spend_sol_hard_cap * 1_000_000_000)
+            if max_spend_sol_hard_cap is not None
+            else None
+        )
+
         self.buyer = PlatformAwareBuyer(
             self.solana_client,
             self.wallet,
@@ -143,6 +153,7 @@ class UniversalTrader:
             max_retries,
             extreme_fast_token_amount,
             extreme_fast_mode,
+            max_spend_lamports=max_spend_lamports,
             compute_units=self.compute_units,
         )
 
@@ -183,6 +194,7 @@ class UniversalTrader:
         # Debounce safeguards
         self.min_hold_before_stop_seconds = max(0, min_hold_before_stop_seconds)
         self.stop_loss_confirmations = max(1, stop_loss_confirmations)
+        self.take_profit_confirmations = max(1, take_profit_confirmations)
 
         # Timing parameters
         self.wait_time_after_creation = wait_time_after_creation
@@ -211,6 +223,8 @@ class UniversalTrader:
             else float(min_market_cap_sol)
         )
         self.wait_before_buy = wait_before_buy
+        # Safety cap for reporting/diagnostics
+        self.max_spend_sol_hard_cap = max_spend_sol_hard_cap
 
         # State tracking
         self.traded_mints: set[Pubkey] = set()
@@ -960,8 +974,9 @@ class UniversalTrader:
         pool_address = self._get_pool_address(token_info)
         curve_manager = self.platform_implementations.curve_manager
 
-        # Debounce state for stop-loss confirmation
+        # Debounce state for confirmations
         consecutive_stop_breaches = 0
+        consecutive_tp_breaches = 0
 
         while position.is_active:
             try:
@@ -978,22 +993,32 @@ class UniversalTrader:
                 should_exit, exit_reason = position.should_exit(current_price)
 
                 if should_exit and exit_reason:
+                    # Enforce universal warm-up (no exits allowed during initial window)
+                    elapsed = (datetime.utcnow() - position.entry_time).total_seconds()
+                    if elapsed < self.min_hold_before_stop_seconds:
+                        logger.debug(
+                            f"Exit signal '{exit_reason.value}' during warm-up ignored ({elapsed:.2f}s < {self.min_hold_before_stop_seconds}s)"
+                        )
+                        consecutive_stop_breaches = 0
+                        consecutive_tp_breaches = 0
+                        await asyncio.sleep(self.price_check_interval)
+                        continue
+
                     # Apply debounce for stop-loss to avoid instant exit on noisy first sample
                     if exit_reason.value == "stop_loss":
-                        elapsed = (datetime.utcnow() - position.entry_time).total_seconds()
-                        # Enforce minimum hold before stop-loss
-                        if elapsed < self.min_hold_before_stop_seconds:
-                            logger.debug(
-                                f"Stop-loss breach ignored during warm-up ({elapsed:.2f}s < {self.min_hold_before_stop_seconds}s)"
-                            )
-                            consecutive_stop_breaches = 0
-                            await asyncio.sleep(self.price_check_interval)
-                            continue
-
                         consecutive_stop_breaches += 1
                         if consecutive_stop_breaches < self.stop_loss_confirmations:
                             logger.debug(
                                 f"Stop-loss breach {consecutive_stop_breaches}/{self.stop_loss_confirmations} — waiting for confirmation"
+                            )
+                            await asyncio.sleep(self.price_check_interval)
+                            continue
+                    elif exit_reason.value == "take_profit":
+                        # Debounce take-profit too (helps avoid immediate TP on spiky first sample)
+                        consecutive_tp_breaches += 1
+                        if consecutive_tp_breaches < self.take_profit_confirmations:
+                            logger.debug(
+                                f"Take-profit breach {consecutive_tp_breaches}/{self.take_profit_confirmations} — waiting for confirmation"
                             )
                             await asyncio.sleep(self.price_check_interval)
                             continue
@@ -1048,20 +1073,20 @@ class UniversalTrader:
                             f"Failed to exit position: {sell_result.error_message}"
                         )
                         # Keep monitoring in case sell can be retried
-                        # Reset breach counter to avoid immediate re-trigger spam
+                        # Reset breach counters to avoid immediate re-trigger spam
                         consecutive_stop_breaches = 0
+                        consecutive_tp_breaches = 0
                 else:
                     # Log current status
                     pnl = position.get_pnl(current_price)
                     logger.debug(
                         f"Position status: {current_price:.8f} SOL per token ({pnl['price_change_pct']:+.2f}%)"
                     )
-                    # Reset stop-loss breach counter if not currently breaching
-                    if (
-                        position.stop_loss_price is None
-                        or current_price > position.stop_loss_price
-                    ):
+                    # Reset breach counters if not currently breaching
+                    if position.stop_loss_price is None or current_price > position.stop_loss_price:
                         consecutive_stop_breaches = 0
+                    if position.take_profit_price is None or current_price < position.take_profit_price:
+                        consecutive_tp_breaches = 0
 
                 # Wait before next price check
                 await asyncio.sleep(self.price_check_interval)

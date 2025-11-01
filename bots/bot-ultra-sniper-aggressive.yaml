@@ -27,6 +27,8 @@ trade:
   buy_amount: 0.02 # Spend 0.02 SOL per trade
   buy_slippage: 0.3 # 30% max price deviation on buy
   sell_slippage: 0.3 # 30% max price deviation on sell
+  # Absolute spend guardrail: never spend more than this, regardless of mode
+  max_spend_sol_hard_cap: 0.03
 
   # Exit strategy: Take Profit / Stop Loss
   exit_strategy: "tp_sl" # Options: "time_based", "tp_sl", "manual"
@@ -37,10 +39,11 @@ trade:
   # Debounce safeguards (aligned with TEST)
   min_hold_before_stop_seconds: 3
   stop_loss_confirmations: 2
+  take_profit_confirmations: 2
 
   # EXTREME FAST mode - Snipe immediately without price checks
-  extreme_fast_mode: true
-  extreme_fast_token_amount: 80 # Buy exactly 80 tokens per trade
+  extreme_fast_mode: false
+  extreme_fast_token_amount: 80 # Ignored when extreme_fast_mode=false
 
 # Priority fee configuration - AGGRESSIVE for fast execution
 priority_fees:

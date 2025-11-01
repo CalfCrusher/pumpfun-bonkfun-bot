@@ -69,6 +69,14 @@ CONFIG_VALIDATION_RULES = [
         float("inf"),
         "filters.max_token_age must be a non-negative number",
     ),
+    # Optional: absolute per-trade spend cap (in SOL)
+    (
+        "trade.max_spend_sol_hard_cap",
+        (int, float),
+        0,
+        float("inf"),
+        "trade.max_spend_sol_hard_cap must be a non-negative number",
+    ),
 ]
 
 # Valid values for enum-like fields
@@ -326,6 +334,10 @@ def print_config_summary(config: dict) -> None:
     print(
         f"  - Extreme fast mode: {'enabled' if trade.get('extreme_fast_mode') else 'disabled'}"
     )
+    if trade.get("max_spend_sol_hard_cap") is not None:
+        print(
+            f"  - Hard spend cap: {trade.get('max_spend_sol_hard_cap')} SOL (absolute limit)"
+        )
 
     fees = config.get("priority_fees", {})
     print("Priority fees:")

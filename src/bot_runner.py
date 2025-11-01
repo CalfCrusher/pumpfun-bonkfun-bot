@@ -82,6 +82,8 @@ async def start_bot(config_path: str):
             buy_amount=cfg["trade"]["buy_amount"],
             buy_slippage=cfg["trade"]["buy_slippage"],
             sell_slippage=cfg["trade"]["sell_slippage"],
+            # Safety cap on SOL spend per trade (optional)
+            max_spend_sol_hard_cap=cfg["trade"].get("max_spend_sol_hard_cap"),
             # Extreme fast mode settings
             extreme_fast_mode=cfg["trade"].get("extreme_fast_mode", False),
             extreme_fast_token_amount=cfg["trade"].get("extreme_fast_token_amount", 30),
@@ -96,6 +98,7 @@ async def start_bot(config_path: str):
                 "min_hold_before_stop_seconds", 2
             ),
             stop_loss_confirmations=cfg["trade"].get("stop_loss_confirmations", 2),
+            take_profit_confirmations=cfg["trade"].get("take_profit_confirmations", 1),
             # Listener configuration
             listener_type=cfg["filters"]["listener_type"],
             # Geyser configuration (if applicable)
