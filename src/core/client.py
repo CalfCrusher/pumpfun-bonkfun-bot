@@ -3,6 +3,7 @@ Solana client abstraction for blockchain operations.
 """
 
 import asyncio
+import time
 import json
 import struct
 from typing import Any
@@ -250,26 +251,68 @@ class SolanaClient:
                 await asyncio.sleep(wait_time)
 
     async def confirm_transaction(
-        self, signature: str, commitment: str = "confirmed"
+        self,
+        signature: str,
+        commitment: str = "confirmed",
+        timeout: float = 60.0,
+        poll_interval: float = 0.5,
     ) -> bool:
-        """Wait for transaction confirmation.
+        """Wait for a transaction to reach the desired commitment and succeed.
+
+        This method polls getSignatureStatuses to ensure the transaction didn't error.
 
         Args:
             signature: Transaction signature
-            commitment: Confirmation commitment level
+            commitment: One of "processed", "confirmed", or "finalized"
+            timeout: Max seconds to wait before giving up
+            poll_interval: Seconds between polls
 
         Returns:
-            Whether transaction was confirmed
+            True if the transaction reached the target commitment with err == None.
+            False if it errored or timed out.
         """
         client = await self.get_client()
-        try:
-            await client.confirm_transaction(
-                signature, commitment=commitment, sleep_seconds=1
-            )
-            return True
-        except Exception:
-            logger.exception(f"Failed to confirm transaction {signature}")
-            return False
+        start = time.monotonic()
+
+        def _meets_commitment(status: str | None) -> bool:
+            if status is None:
+                return False
+            if commitment == "finalized":
+                return status == "finalized"
+            if commitment == "confirmed":
+                return status in ("confirmed", "finalized")
+            # processed
+            return status in ("processed", "confirmed", "finalized")
+
+        last_status = None
+        while time.monotonic() - start < timeout:
+            try:
+                resp = await client.get_signature_statuses([signature])
+                value = resp.value[0] if resp and getattr(resp, "value", None) else None
+                if value is not None:
+                    # value.err can be truthy when tx execution failed
+                    err = getattr(value, "err", None)
+                    conf_status = getattr(value, "confirmation_status", None)
+                    last_status = conf_status or last_status
+                    if err:
+                        logger.error(
+                            f"Transaction {signature} failed with error: {err}"
+                        )
+                        return False
+                    if _meets_commitment(conf_status):
+                        return True
+                await asyncio.sleep(poll_interval)
+            except Exception as e:
+                # Do not abort immediately; transient RPC issues can occur
+                logger.debug(
+                    f"Transient error while confirming {signature}: {e!s}"
+                )
+                await asyncio.sleep(poll_interval)
+
+        logger.error(
+            f"Timed out waiting for confirmation of {signature} (last status: {last_status})"
+        )
+        return False
 
     async def post_rpc(self, body: dict[str, Any]) -> dict[str, Any] | None:
         """
