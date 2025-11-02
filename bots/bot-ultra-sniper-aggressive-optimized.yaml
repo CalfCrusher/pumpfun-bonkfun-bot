@@ -29,7 +29,7 @@ trade:
   buy_slippage: 0.3 # 30% max price deviation on buy
   sell_slippage: 0.3 # 30% max price deviation on sell
   # Absolute spend guardrail: never spend more than this, regardless of mode
-  max_spend_sol_hard_cap: 0.03
+  max_spend_sol_hard_cap: 0.5
 
   # Exit strategy: Take Profit / Stop Loss
   exit_strategy: "tp_sl" # Options: "time_based", "tp_sl", "manual"
@@ -73,7 +73,7 @@ filters:
   # Liquidity filtering (real reserves preferred)
   min_real_liquidity_sol: 40.0   # Minimum REAL SOL liquidity to buy (preferred)
   min_market_cap_sol: 15.0       # Legacy/backup key; ignored if min_real_liquidity_sol is set
-  wait_before_buy: 3              # Give more time for curve account to appear reliably
+  wait_before_buy: 5              # Give more time for curve account to appear reliably
 
 # Retry and timeout settings
 retries:
