@@ -114,6 +114,40 @@ class Position:
 
         return False, None
 
+    def should_exit_for_profit_or_loss(self, current_price: float) -> tuple[bool, ExitReason | None]:
+        """Check if position should exit due to TP or SL ONLY (not max hold time).
+
+        Args:
+            current_price: Current token price
+
+        Returns:
+            Tuple of (should_exit, exit_reason) - only TP or SL, never max_hold_time
+        """
+        if not self.is_active:
+            return False, None
+
+        # Check take profit
+        if self.take_profit_price and current_price >= self.take_profit_price:
+            return True, ExitReason.TAKE_PROFIT
+
+        # Check stop loss
+        if self.stop_loss_price and current_price <= self.stop_loss_price:
+            return True, ExitReason.STOP_LOSS
+
+        return False, None
+
+    def has_max_hold_time_expired(self) -> bool:
+        """Check if max hold time has been exceeded (hard upper bound).
+
+        Returns:
+            True if max_hold_time is set and has been exceeded
+        """
+        if not self.is_active or not self.max_hold_time:
+            return False
+
+        elapsed_time = (datetime.utcnow() - self.entry_time).total_seconds()
+        return elapsed_time >= self.max_hold_time
+
     def close_position(self, exit_price: float, exit_reason: ExitReason) -> None:
         """Close the position with exit details.
 

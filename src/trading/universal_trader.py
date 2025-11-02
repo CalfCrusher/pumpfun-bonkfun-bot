@@ -26,7 +26,7 @@ from monitoring.listener_factory import ListenerFactory
 from platforms import get_platform_implementations
 from trading.base import TradeResult
 from trading.platform_aware import PlatformAwareBuyer, PlatformAwareSeller
-from trading.position import Position
+from trading.position import Position, ExitReason
 from utils.logger import get_logger
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -989,10 +989,54 @@ class UniversalTrader:
                     await asyncio.sleep(self.price_check_interval)
                     continue
 
-                # Check if position should be exited
-                should_exit, exit_reason = position.should_exit(current_price)
+                # Check for max hold time FIRST (hard upper bound with no debounce)
+                if position.has_max_hold_time_expired():
+                    logger.info(f"Max hold time ({position.max_hold_time}s) reached - forcing exit")
+                    logger.info(f"Current price: {current_price:.8f} SOL per token")
+                    pnl = position.get_pnl(current_price)
+                    logger.info(
+                        f"Position PnL at timeout: {pnl['price_change_pct']:.2f}% ({pnl['unrealized_pnl_sol']:.6f} SOL)"
+                    )
+                    # Force exit without confirmations (max_hold_time is a hard deadline)
+                    sell_result = await self.seller.execute(token_info)
+                    if sell_result.success:
+                        position.close_position(sell_result.price, ExitReason.MAX_HOLD_TIME)
+                        logger.info(f"Successfully exited position: {ExitReason.MAX_HOLD_TIME.value}")
+                        self._log_trade(
+                            "sell",
+                            token_info,
+                            sell_result.price,
+                            sell_result.amount,
+                            sell_result.tx_signature,
+                        )
+                        final_pnl = position.get_pnl()
+                        logger.info(
+                            f"Final PnL: {final_pnl['price_change_pct']:.2f}% ({final_pnl['unrealized_pnl_sol']:.6f} SOL)"
+                        )
+                        await handle_cleanup_after_sell(
+                            self.solana_client,
+                            self.wallet,
+                            token_info.mint,
+                            self.priority_fee_manager,
+                            self.cleanup_mode,
+                            self.cleanup_with_priority_fee,
+                            self.cleanup_force_close_with_burn,
+                        )
+                        break
+                    else:
+                        logger.error(
+                            f"Failed to exit on max hold time: {sell_result.error_message}"
+                        )
+                        # If sell failed, keep monitoring and retry
+                        consecutive_stop_breaches = 0
+                        consecutive_tp_breaches = 0
+                        await asyncio.sleep(self.price_check_interval)
+                        continue
 
-                if should_exit and exit_reason:
+                # Check for TP or SL (these get warm-up and confirmations)
+                should_exit_tp_sl, exit_reason = position.should_exit_for_profit_or_loss(current_price)
+
+                if should_exit_tp_sl and exit_reason:
                     # Enforce universal warm-up (no exits allowed during initial window)
                     elapsed = (datetime.utcnow() - position.entry_time).total_seconds()
                     if elapsed < self.min_hold_before_stop_seconds:
