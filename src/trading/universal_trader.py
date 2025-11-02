@@ -430,15 +430,52 @@ class UniversalTrader:
                             except Exception:
                                 logger.debug("Failed to derive associated bonding curve", exc_info=True)
 
+                        # Prefer canonical PDA first, then fallbacks
+                        try:
+                            canonical_addr = address_provider.derive_pool_address(token.mint)
+                            if canonical_addr not in candidates:
+                                candidates.insert(0, canonical_addr)
+                        except Exception:
+                            canonical_addr = None
+
                         pool_state: dict | None = None
                         used_address: Pubkey | None = None
-                        for addr in candidates:
-                            try:
-                                pool_state = await curve_manager.get_pool_state(addr)
-                                used_address = addr
+                        # Plausibility bounds (in lamports)
+                        REAL_MAX_LAMPORTS = int(5_000 * 1_000_000_000)       # 5k SOL
+                        VIRTUAL_MAX_LAMPORTS = int(50_000 * 1_000_000_000)   # 50k SOL
+
+                        # Short retry to avoid latching onto uninitialized/fallback accounts
+                        for attempt in range(3):
+                            for addr in candidates:
+                                try:
+                                    # Verify account owner matches platform program
+                                    account_info = await self.solana_client.get_account_info(addr)
+                                    owner = getattr(account_info, "owner", None)
+                                    if owner is None or (hasattr(address_provider, "program_id") and owner != address_provider.program_id):
+                                        continue
+
+                                    ps = await curve_manager.get_pool_state(addr)
+                                    # Basic plausibility checks on reserves
+                                    real_lamports = ps.get("real_sol_reserves", 0) or 0
+                                    virt_lamports = ps.get("virtual_sol_reserves", 0) or 0
+                                    if real_lamports < 0 or virt_lamports < 0:
+                                        continue
+                                    if real_lamports > REAL_MAX_LAMPORTS or virt_lamports > VIRTUAL_MAX_LAMPORTS:
+                                        # Discard implausible early samples
+                                        logger.debug(
+                                            f"Discarding implausible reserve sample [addr: {addr}] real={real_lamports} virt={virt_lamports} (lamports)"
+                                        )
+                                        continue
+
+                                    pool_state = ps
+                                    used_address = addr
+                                    break
+                                except Exception:
+                                    continue
+                            if pool_state is not None:
                                 break
-                            except Exception:
-                                continue
+                            # backoff before next retry
+                            await asyncio.sleep(0.2 * (attempt + 1))
 
                         if pool_state is not None:
                             # Prefer REAL SOL reserves as a proxy for actual on-chain liquidity.
@@ -452,10 +489,11 @@ class UniversalTrader:
                                 else virtual_sol_reserves_lamports / 1_000_000_000
                             )
 
+                            source = "canonical" if canonical_addr and used_address == canonical_addr else "fallback"
                             logger.info(
                                 (
                                     "Token %s liquidity check: %.4f SOL "
-                                    "(real_sol_reserves: %s lamports, virtual_sol_reserves: %s lamports) [addr: %s]"
+                                    "(real_sol_reserves: %s lamports, virtual_sol_reserves: %s lamports) [addr: %s, source: %s]"
                                 )
                                 % (
                                     token.symbol,
@@ -463,6 +501,7 @@ class UniversalTrader:
                                     real_sol_reserves_lamports,
                                     virtual_sol_reserves_lamports,
                                     used_address,
+                                    source,
                                 )
                             )
 
@@ -477,7 +516,7 @@ class UniversalTrader:
                                 return
                             else:
                                 logger.info(
-                                    f"Liquidity check passed: {liquidity_sol:.4f} SOL >= {self.min_liquidity_sol} SOL"
+                                    f"Liquidity check passed: {liquidity_sol:.4f} SOL >= {self.min_liquidity_sol} SOL [addr: {used_address}, source: {source}]"
                                 )
                         else:
                             logger.warning(
@@ -649,15 +688,52 @@ class UniversalTrader:
                             except Exception:
                                 logger.debug("Failed to derive associated bonding curve", exc_info=True)
 
+                        # Prefer canonical PDA first, then fallbacks
+                        try:
+                            canonical_addr = address_provider.derive_pool_address(token_info.mint)
+                            if canonical_addr not in candidates:
+                                candidates.insert(0, canonical_addr)
+                        except Exception:
+                            canonical_addr = None
+
                         pool_state: dict | None = None
                         used_address: Pubkey | None = None
-                        for addr in candidates:
-                            try:
-                                pool_state = await curve_manager.get_pool_state(addr)
-                                used_address = addr
+                        # Plausibility bounds (in lamports)
+                        REAL_MAX_LAMPORTS = int(5_000 * 1_000_000_000)       # 5k SOL
+                        VIRTUAL_MAX_LAMPORTS = int(50_000 * 1_000_000_000)   # 50k SOL
+
+                        # Short retry to avoid latching onto uninitialized/fallback accounts
+                        for attempt in range(3):
+                            for addr in candidates:
+                                try:
+                                    # Verify account owner matches platform program
+                                    account_info = await self.solana_client.get_account_info(addr)
+                                    owner = getattr(account_info, "owner", None)
+                                    if owner is None or (hasattr(address_provider, "program_id") and owner != address_provider.program_id):
+                                        continue
+
+                                    ps = await curve_manager.get_pool_state(addr)
+                                    # Basic plausibility checks on reserves
+                                    real_lamports = ps.get("real_sol_reserves", 0) or 0
+                                    virt_lamports = ps.get("virtual_sol_reserves", 0) or 0
+                                    if real_lamports < 0 or virt_lamports < 0:
+                                        continue
+                                    if real_lamports > REAL_MAX_LAMPORTS or virt_lamports > VIRTUAL_MAX_LAMPORTS:
+                                        # Discard implausible early samples
+                                        logger.debug(
+                                            f"Discarding implausible reserve sample [addr: {addr}] real={real_lamports} virt={virt_lamports} (lamports)"
+                                        )
+                                        continue
+
+                                    pool_state = ps
+                                    used_address = addr
+                                    break
+                                except Exception:
+                                    continue
+                            if pool_state is not None:
                                 break
-                            except Exception:
-                                continue
+                            # backoff before next retry
+                            await asyncio.sleep(0.2 * (attempt + 1))
 
                         if pool_state is not None:
                             real_sol_reserves_lamports = pool_state.get("real_sol_reserves", 0)
@@ -669,10 +745,11 @@ class UniversalTrader:
                                 else virtual_sol_reserves_lamports / 1_000_000_000
                             )
 
+                            source = "canonical" if canonical_addr and used_address == canonical_addr else "fallback"
                             logger.info(
                                 (
                                     "Token %s liquidity check: %.4f SOL "
-                                    "(real_sol_reserves: %s lamports, virtual_sol_reserves: %s lamports) [addr: %s]"
+                                    "(real_sol_reserves: %s lamports, virtual_sol_reserves: %s lamports) [addr: %s, source: %s]"
                                 )
                                 % (
                                     token_info.symbol,
@@ -680,6 +757,7 @@ class UniversalTrader:
                                     real_sol_reserves_lamports,
                                     virtual_sol_reserves_lamports,
                                     used_address,
+                                    source,
                                 )
                             )
 
@@ -694,7 +772,7 @@ class UniversalTrader:
                                 continue
                             else:
                                 logger.info(
-                                    f"Liquidity check passed: {liquidity_sol:.4f} SOL >= {self.min_liquidity_sol} SOL"
+                                    f"Liquidity check passed: {liquidity_sol:.4f} SOL >= {self.min_liquidity_sol} SOL [addr: {used_address}, source: {source}]"
                                 )
                         else:
                             logger.warning(
