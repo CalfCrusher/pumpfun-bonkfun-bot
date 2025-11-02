@@ -977,6 +977,8 @@ class UniversalTrader:
         # Debounce state for confirmations
         consecutive_stop_breaches = 0
         consecutive_tp_breaches = 0
+        max_hold_time_sell_attempts = 0
+        max_hold_time_exit_triggered = False
 
         while position.is_active:
             try:
@@ -991,14 +993,20 @@ class UniversalTrader:
 
                 # Check for max hold time FIRST (hard upper bound with no debounce)
                 if position.has_max_hold_time_expired():
-                    logger.info(f"Max hold time ({position.max_hold_time}s) reached - forcing exit")
-                    logger.info(f"Current price: {current_price:.8f} SOL per token")
-                    pnl = position.get_pnl(current_price)
-                    logger.info(
-                        f"Position PnL at timeout: {pnl['price_change_pct']:.2f}% ({pnl['unrealized_pnl_sol']:.6f} SOL)"
-                    )
-                    # Force exit without confirmations (max_hold_time is a hard deadline)
+                    if not max_hold_time_exit_triggered:
+                        # First time hitting max_hold_time
+                        max_hold_time_exit_triggered = True
+                        logger.info(f"Max hold time ({position.max_hold_time}s) reached - forcing exit")
+                        logger.info(f"Current price: {current_price:.8f} SOL per token")
+                        pnl = position.get_pnl(current_price)
+                        logger.info(
+                            f"Position PnL at timeout: {pnl['price_change_pct']:.2f}% ({pnl['unrealized_pnl_sol']:.6f} SOL)"
+                        )
+                    
+                    # Try to exit (will retry up to 10 times internally in seller)
+                    max_hold_time_sell_attempts += 1
                     sell_result = await self.seller.execute(token_info)
+                    
                     if sell_result.success:
                         position.close_position(sell_result.price, ExitReason.MAX_HOLD_TIME)
                         logger.info(f"Successfully exited position: {ExitReason.MAX_HOLD_TIME.value}")
@@ -1024,14 +1032,25 @@ class UniversalTrader:
                         )
                         break
                     else:
-                        logger.error(
-                            f"Failed to exit on max hold time: {sell_result.error_message}"
-                        )
-                        # If sell failed, keep monitoring and retry
-                        consecutive_stop_breaches = 0
-                        consecutive_tp_breaches = 0
-                        await asyncio.sleep(self.price_check_interval)
-                        continue
+                        if max_hold_time_sell_attempts >= 3:
+                            # Give up after 3 attempts (seller internally retries 10 times each)
+                            logger.error(
+                                f"Failed to exit on max hold time after {max_hold_time_sell_attempts} attempts: {sell_result.error_message}"
+                            )
+                            # Force close position locally to prevent infinite loop
+                            position.close_position(current_price, ExitReason.MAX_HOLD_TIME)
+                            logger.warning("Forcing position closure due to persistent sell failures")
+                            break
+                        else:
+                            # Retry with longer wait
+                            wait_time = 2.0 + (max_hold_time_sell_attempts * 0.5)
+                            logger.warning(
+                                f"Max hold time sell attempt {max_hold_time_sell_attempts} failed, retrying in {wait_time:.1f}s..."
+                            )
+                            consecutive_stop_breaches = 0
+                            consecutive_tp_breaches = 0
+                            await asyncio.sleep(wait_time)
+                            continue
 
                 # Check for TP or SL (these get warm-up and confirmations)
                 should_exit_tp_sl, exit_reason = position.should_exit_for_profit_or_loss(current_price)

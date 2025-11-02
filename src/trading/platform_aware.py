@@ -225,18 +225,21 @@ class PlatformAwareSeller(Trader):
             # Fetch token balance with retries to handle eventual consistency right after buys
             token_balance: int | None = None
             last_error: Exception | None = None
-            for attempt in range(6):
+            for attempt in range(10):  # Increased from 6 to 10 attempts
                 try:
                     token_balance = await self.client.get_token_account_balance(
                         user_token_account
                     )
+                    if attempt > 0:
+                        logger.info(f"Token account found after {attempt} retries")
                     break
                 except RPCException as e:
                     # Common transient immediately after ATA creation/transfer
-                    if "could not find account" in str(e).lower() and attempt < 5:
-                        wait = 0.4 * (attempt + 1)
+                    if "could not find account" in str(e).lower() and attempt < 9:
+                        # Exponential backoff: 0.5s, 1s, 1.5s, 2s, 2.5s, 3s, 3.5s, 4s, 4.5s
+                        wait = 0.5 * (attempt + 1)
                         logger.debug(
-                            f"Token account not yet visible ({user_token_account}), retry {attempt+1}/6 in {wait:.1f}s"
+                            f"Token account not yet visible, retry {attempt+1}/10 in {wait:.1f}s"
                         )
                         await asyncio.sleep(wait)
                         last_error = e
@@ -245,7 +248,7 @@ class PlatformAwareSeller(Trader):
                     break
             if token_balance is None:
                 raise last_error or RuntimeError(
-                    "Failed to fetch token account balance"
+                    f"Failed to fetch token account balance after 10 attempts: {last_error}"
                 )
             token_balance_decimal = token_balance / 10**TOKEN_DECIMALS
 
