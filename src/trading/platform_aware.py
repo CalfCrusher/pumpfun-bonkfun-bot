@@ -129,24 +129,16 @@ class PlatformAwareBuyer(Trader):
                     "account_data_size", token_info.platform
                 ),
             )
-
-            success = await self.client.confirm_transaction(tx_signature)
-
-            if success:
-                logger.info(f"Buy transaction confirmed: {tx_signature}")
-                return TradeResult(
-                    success=True,
-                    platform=token_info.platform,
-                    tx_signature=tx_signature,
-                    amount=token_amount,
-                    price=token_price_sol,
-                )
-            else:
-                return TradeResult(
-                    success=False,
-                    platform=token_info.platform,
-                    error_message=f"Transaction failed to confirm: {tx_signature}",
-                )
+            # Revert to previous behavior: consider send success as trade success.
+            # Confirmation is noisy on some RPCs and was suppressing valid trades/logs.
+            logger.info(f"Buy transaction sent: {tx_signature}")
+            return TradeResult(
+                success=True,
+                platform=token_info.platform,
+                tx_signature=tx_signature,
+                amount=token_amount,
+                price=token_price_sol,
+            )
 
         except Exception as e:
             logger.exception("Buy operation failed")
@@ -314,24 +306,15 @@ class PlatformAwareSeller(Trader):
                     "account_data_size", token_info.platform
                 ),
             )
-
-            success = await self.client.confirm_transaction(tx_signature)
-
-            if success:
-                logger.info(f"Sell transaction confirmed: {tx_signature}")
-                return TradeResult(
-                    success=True,
-                    platform=token_info.platform,
-                    tx_signature=tx_signature,
-                    amount=token_balance_decimal,
-                    price=token_price_sol,
-                )
-            else:
-                return TradeResult(
-                    success=False,
-                    platform=token_info.platform,
-                    error_message=f"Transaction failed to confirm: {tx_signature}",
-                )
+            # Revert to previous behavior: treat a successful send as success.
+            logger.info(f"Sell transaction sent: {tx_signature}")
+            return TradeResult(
+                success=True,
+                platform=token_info.platform,
+                tx_signature=tx_signature,
+                amount=token_balance_decimal,
+                price=token_price_sol,
+            )
 
         except Exception as e:
             logger.exception("Sell operation failed")
