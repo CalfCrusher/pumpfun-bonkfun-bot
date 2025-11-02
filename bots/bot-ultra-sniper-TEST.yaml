@@ -28,7 +28,7 @@ trade:
   take_profit_percentage: 0.5 # +50% profit
   stop_loss_percentage: 0.3 # -30% loss
   max_hold_time: 5 # 5 seconds max hold
-  price_check_interval: 1 # Check every 1 second
+  price_check_interval: 5 # Check every 5 seconds (Chainstak API optimized)
   # Debounce safeguards to avoid instant stop-loss on noisy first sample
   min_hold_before_stop_seconds: 3
   stop_loss_confirmations: 2
