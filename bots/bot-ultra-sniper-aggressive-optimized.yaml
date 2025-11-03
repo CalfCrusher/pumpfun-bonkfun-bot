@@ -25,9 +25,9 @@ geyser:
 
 # Trading parameters - AGGRESSIVE SETTINGS (OPTIMIZED FOR API SAVINGS)
 trade:
-  buy_amount: 0.08 # Spend 0.07 SOL per trade
-  buy_slippage: 0.2 # 20% max price deviation on buy
-  sell_slippage: 0.2 # 20% max price deviation on sell
+  buy_amount: 0.08 # Spend 0.08 SOL per trade
+  buy_slippage: 0.3 # 30% max price deviation on buy
+  sell_slippage: 0.3 # 30% max price deviation on sell
   # Absolute spend guardrail: never spend more than this, regardless of mode
   max_spend_sol_hard_cap: 0.5
 
