@@ -34,7 +34,7 @@ trade:
   # Exit strategy: Take Profit / Stop Loss
   exit_strategy: "tp_sl" # Options: "time_based", "tp_sl", "manual"
   take_profit_percentage: 0.4 # Sell at +40% profit (0.4 = 40%)
-  stop_loss_percentage: 0.3 # Sell at -30% loss (0.3 = 30%)
+  stop_loss_percentage: 0.2 # Sell at -20% loss (0.2 = 20%)
   max_hold_time: 8 # ULTRA-FAST: Hold maximum 8 seconds!
   price_check_interval: 1 # Check price EVERY second (fastest possible)
   # Debounce safeguards (aligned with TEST)
