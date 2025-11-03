@@ -35,7 +35,7 @@ trade:
   exit_strategy: "tp_sl" # Options: "time_based", "tp_sl", "manual"
   take_profit_percentage: 0.4 # Sell at +40% profit (0.4 = 40%)
   stop_loss_percentage: 0.3 # Sell at -30% loss (0.3 = 30%)
-  max_hold_time: 5 # ULTRA-FAST: Hold maximum 5 seconds!
+  max_hold_time: 8 # ULTRA-FAST: Hold maximum 8 seconds!
   price_check_interval: 1 # Check price EVERY second (fastest possible)
   # Debounce safeguards (aligned with TEST)
   min_hold_before_stop_seconds: 3
@@ -66,7 +66,7 @@ filters:
   match_string: null # Buy ALL tokens (no name filter)
   bro_address: null # Buy from ANY creator (no creator filter)
   listener_type: "logs" # Use logs listener (works with standard RPC)
-  max_token_age: 10 # Allow up to 10s age to reduce age-outs while still fresh
+  max_token_age: 15 # Allow up to 15s age to reduce age-outs while still fresh
   marry_mode: false # Auto-sell enabled (don't hold forever)
   yolo_mode: true # CONTINUOUS MODE - Trade all matching tokens non-stop!
 
