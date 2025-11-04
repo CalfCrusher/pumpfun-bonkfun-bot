@@ -38,7 +38,7 @@ trade:
   max_hold_time: 8 # ULTRA-FAST: Hold maximum 8 seconds!
   price_check_interval: 1 # Check price EVERY second (fastest possible)
   # Debounce safeguards (aligned with TEST)
-  min_hold_before_stop_seconds: 3
+  min_hold_before_stop_seconds: 2
   stop_loss_confirmations: 2
   take_profit_confirmations: 2
 
