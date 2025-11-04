@@ -66,7 +66,7 @@ filters:
   match_string: null # Buy ALL tokens (no name filter)
   bro_address: null # Buy from ANY creator (no creator filter)
   listener_type: "logs" # Use logs listener (works with standard RPC)
-  max_token_age: 12 # Allow up to 12s age to reduce age-outs while still fresh
+  max_token_age: 13 # Allow up to 13s age to reduce age-outs while still fresh
   marry_mode: false # Auto-sell enabled (don't hold forever)
   yolo_mode: true # CONTINUOUS MODE - Trade all matching tokens non-stop!
 
