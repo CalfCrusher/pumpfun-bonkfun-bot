@@ -25,7 +25,7 @@ geyser:
 
 # Trading parameters - AGGRESSIVE SETTINGS (OPTIMIZED FOR API SAVINGS)
 trade:
-  buy_amount: 0.05 # Spend 0.05 SOL per trade
+  buy_amount: 0.1 # Spend 0.1 SOL per trade
   buy_slippage: 0.3 # 30% max price deviation on buy
   sell_slippage: 0.3 # 30% max price deviation on sell
   # Absolute spend guardrail: never spend more than this, regardless of mode
@@ -35,7 +35,7 @@ trade:
   exit_strategy: "tp_sl" # Options: "time_based", "tp_sl", "manual"
   take_profit_percentage: 0.5 # Sell at +50% profit (0.5 = 50%)
   stop_loss_percentage: 0.2 # Sell at -20% loss (0.20 = 20%)
-  max_hold_time: 5 # ULTRA-FAST: Hold maximum 5 seconds!
+  max_hold_time: 15 # ULTRA-FAST: Hold maximum 15 seconds!
   price_check_interval: 0.5 # Check price EVERY half second (fastest possible)
   # Debounce safeguards (aligned with TEST)
   min_hold_before_stop_seconds: 1
@@ -66,14 +66,14 @@ filters:
   match_string: null # Buy ALL tokens (no name filter)
   bro_address: null # Buy from ANY creator (no creator filter)
   listener_type: "logs" # Use logs listener (works with standard RPC)
-  max_token_age: 10 # Allow up to 10s age to reduce age-outs while still fresh
+  max_token_age: 15 # Allow up to 10s age to reduce age-outs while still fresh
   marry_mode: false # Auto-sell enabled (don't hold forever)
   yolo_mode: true # CONTINUOUS MODE - Trade all matching tokens non-stop!
 
   # Liquidity filtering (real reserves preferred)
-  min_real_liquidity_sol: 30.0   # Minimum REAL SOL liquidity to buy (preferred)
+  min_real_liquidity_sol: 70.0   # Minimum REAL SOL liquidity to buy (preferred)
   min_market_cap_sol: 15.0       # Legacy/backup key; ignored if min_real_liquidity_sol is set
-  wait_before_buy: 4              # Give more time for curve account to appear reliably
+  wait_before_buy: 5              # Give more time for curve account to appear reliably
 
 # Retry and timeout settings
 retries:
