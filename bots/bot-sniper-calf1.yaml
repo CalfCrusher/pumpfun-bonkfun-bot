@@ -73,7 +73,7 @@ filters:
   # Liquidity filtering (real reserves preferred)
   min_real_liquidity_sol: 20.0   # Minimum REAL SOL liquidity to buy (preferred)
   min_market_cap_sol: 15.0       # Legacy/backup key; ignored if min_real_liquidity_sol is set
-  wait_before_buy: 5              # Give more time for curve account to appear reliably
+  wait_before_buy: 2              # Give more time for curve account to appear reliably
 
 # Retry and timeout settings
 retries:
