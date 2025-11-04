@@ -14,13 +14,16 @@ The script will:
 5. Generate a detailed summary of actual trading performance
 
 Usage:
-    python scripts/summary.py
+    python scripts/summary.py                    # Analyze all trades
+    python scripts/summary.py --limit 10         # Analyze last 10 trades
+    python scripts/summary.py --limit 50         # Analyze last 50 trades
     
 Environment Variables Required (from .env):
     SOLANA_NODE_RPC_ENDPOINT - Solana RPC endpoint URL
     SOLANA_PRIVATE_KEY - Your wallet's private key (for wallet address extraction)
 """
 
+import argparse
 import asyncio
 import json
 import os
@@ -97,8 +100,16 @@ class TradingSummary:
         if self.client:
             await self.client.close()
             
-    def load_trades_log(self, log_path: str) -> list[TradeLog]:
-        """Load and parse the trades.log file."""
+    def load_trades_log(self, log_path: str, limit: int | None = None) -> list[TradeLog]:
+        """Load and parse the trades.log file.
+        
+        Args:
+            log_path: Path to the trades log file
+            limit: If specified, only return the last `limit` trades
+            
+        Returns:
+            List of TradeLog objects (or last `limit` if limit is specified)
+        """
         trades = []
         log_file = Path(log_path)
         
@@ -130,6 +141,10 @@ class TradingSummary:
                 except (json.JSONDecodeError, KeyError) as e:
                     print(f"⚠️  Warning: Failed to parse line {line_num}: {e}")
                     continue
+        
+        # Return only the last `limit` trades if specified
+        if limit is not None and limit > 0:
+            trades = trades[-limit:]
                     
         return trades
         
@@ -375,8 +390,26 @@ class TradingSummary:
 
 async def main():
     """Main entry point for the summary script."""
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(
+        description="Generate trading summary from trades log and Solana RPC data"
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Limit analysis to the last N trades (default: analyze all trades)"
+    )
+    args = parser.parse_args()
+    
     print("🚀 Trading Summary Generator")
     print("=" * 80)
+    
+    if args.limit:
+        print(f"📊 Mode: Last {args.limit} trades")
+    else:
+        print(f"📊 Mode: All trades")
+    print("")
     
     # Load environment variables from root .env
     root_dir = Path(__file__).parent.parent
@@ -426,8 +459,8 @@ async def main():
     async with TradingSummary(str(rpc_endpoint), wallet_pubkey) as summary:
         # Load trades
         print(f"📖 Loading trades from {trades_log_path}...")
-        trades = summary.load_trades_log(str(trades_log_path))
-        print(f"   Found {len(trades)} total trades")
+        trades = summary.load_trades_log(str(trades_log_path), limit=args.limit)
+        print(f"   Found {len(trades)} trades to analyze")
         
         buy_count = sum(1 for t in trades if t.action == "buy")
         sell_count = sum(1 for t in trades if t.action == "sell")
